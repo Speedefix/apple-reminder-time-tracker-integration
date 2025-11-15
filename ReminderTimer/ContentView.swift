@@ -6,54 +6,62 @@
 //
 
 import SwiftUI
-import SwiftData
+import EventKit
 
 struct ContentView: View {
-    @Environment(\.modelContext) private var modelContext
-    @Query private var items: [Item]
+    @StateObject private var reminderManager = ReminderManager()
+    @State private var searchText: String = ""
+    @State private var selectedReminderID: String? = nil
+    @FocusState private var searchFocused: Bool
+
+    var filteredReminders: [EKReminder] {
+        if searchText.isEmpty {
+            return reminderManager.reminders
+        }
+        return reminderManager.reminders.filter { reminder in
+            let title = reminder.title?.lowercased() ?? ""
+            return title.contains(searchText.lowercased())
+        }
+    }
 
     var body: some View {
-        NavigationSplitView {
-            List {
-                ForEach(items) { item in
-                    NavigationLink {
-                        Text("Item at \(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))")
-                    } label: {
-                        Text(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))
-                    }
-                }
-                .onDelete(perform: deleteItems)
-            }
-            .navigationSplitViewColumnWidth(min: 180, ideal: 200)
-            .toolbar {
-                ToolbarItem {
-                    Button(action: addItem) {
-                        Label("Add Item", systemImage: "plus")
+        NavigationView {
+            // LEFT SIDE
+            VStack {
+                TextField("Suchen ...", text: $searchText)
+                    .textFieldStyle(.roundedBorder)
+                    .padding()
+                    .focused($searchFocused)
+
+                List(selection: $selectedReminderID) {
+                    ForEach(filteredReminders, id: \.calendarItemIdentifier) { reminder in
+                        Text(reminder.title ?? "Ohne Titel")
+                            .tag(reminder.calendarItemIdentifier as String?)
                     }
                 }
             }
-        } detail: {
-            Text("Select an item")
-        }
-    }
+            .frame(minWidth: 250)
 
-    private func addItem() {
-        withAnimation {
-            let newItem = Item(timestamp: Date())
-            modelContext.insert(newItem)
+            // RIGHT SIDE
+            if let id = selectedReminderID,
+               let reminder = reminderManager.reminders.first(where: { $0.calendarItemIdentifier == id }) {
+                ReminderDetailView(reminder: reminder, reminderManager: reminderManager)
+            } else {
+                Text("Wähle eine Erinnerung aus")
+                    .foregroundStyle(.secondary)
+            }
         }
-    }
-
-    private func deleteItems(offsets: IndexSet) {
-        withAnimation {
-            for index in offsets {
-                modelContext.delete(items[index])
+        .task {
+            if await reminderManager.requestAccess() {
+                await reminderManager.loadReminders()
             }
         }
     }
 }
 
-#Preview {
-    ContentView()
-        .modelContainer(for: Item.self, inMemory: true)
+
+struct YourView_Previews: PreviewProvider {
+    static var previews: some View {
+        ContentView()
+    }
 }
