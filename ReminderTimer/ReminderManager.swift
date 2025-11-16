@@ -11,11 +11,19 @@ import Combine
 
 @MainActor
 class ReminderManager: ObservableObject {
+    // MARK: - Time Spent Format Constants
+    private let timeSpentTag = "time_spent:"
+    private let timeSpentRegex =
+        #"time_spent:\s*(\d+)h\s*(\d+)m\s*(\d+)s"#
+    
     private let eventStore = EKEventStore()
+    private var fetchTimer: Timer?
+    
     @Published var reminders: [EKReminder] = []
+    @Published var calendars: [EKCalendar] = []
     @Published var runningTimers: [String: Date] = [:]   // [ReminderID : startDate]
     @Published var elapsedTimes: [String: TimeInterval] = [:]  // For UI updates
-
+    
     private var timer: Timer?
 
     init() {
@@ -33,20 +41,22 @@ class ReminderManager: ObservableObject {
             }
         }
     }
-
+    
     func loadReminders() async {
         let predicate = eventStore.predicateForReminders(in: nil)
         eventStore.fetchReminders(matching: predicate) { reminders in
             DispatchQueue.main.async {
-                self.reminders = (reminders ?? [])
-                    .filter { !$0.isCompleted }       // nur offene
-                    .sorted { ($0.title ?? "") < ($1.title ?? "") }
+                let allReminders = (reminders ?? []).filter { !$0.isCompleted }
+                self.reminders = allReminders.sorted { ($0.title ?? "") < ($1.title ?? "") }
+
+                // Kalender sammeln
+                let cals = Set(allReminders.compactMap { $0.calendar })
+                self.calendars = Array(cals).sorted { $0.title < $1.title }
             }
         }
     }
 
     // MARK: - Timer Logic
-
     func startTimer(for reminder: EKReminder) {
         let id = reminder.calendarItemIdentifier
         runningTimers[id] = Date()
@@ -65,69 +75,105 @@ class ReminderManager: ObservableObject {
     }
     
     func formatElapsed(_ seconds: TimeInterval) -> String {
-        let totalSeconds = Int(seconds.rounded())
-        let hours = totalSeconds / 3600
-        let minutes = (totalSeconds % 3600) / 60
-        let secs = totalSeconds % 60
+        let total = Int(seconds.rounded())
+        let h = total / 3600
+        let m = (total % 3600) / 60
+        let s = total % 60
 
-        return "\(hours)h \(minutes)m \(secs)s"
+        return "\(h)h \(m)m \(s)s"
+    }
+    
+    func formatPretty(h: Int, m: Int, s: Int) -> String {
+        var parts: [String] = []
+
+        if h > 0 { parts.append("\(h)h") }
+        if m > 0 { parts.append("\(m)m") }
+        if s > 0 { parts.append("\(s)s") }
+
+        // Wenn alles 0 ist
+        if parts.isEmpty { return "0s" }
+
+        return parts.joined(separator: " ")
+    }
+    
+    func prettyTimeSpent(for reminder: EKReminder) -> String {
+        guard let notes = reminder.notes,
+              let ts = parseExistingTimeSpent(in: notes) else {
+            return "Untracked"
+        }
+        
+        if ts.h == 0 && ts.m == 0 && ts.s == 0 {
+            return "Untracked"
+        }
+        
+        return formatPretty(h: ts.h, m: ts.m, s: ts.s)
+    }
+    
+    func parseExistingTimeSpent(in notes: String) -> (h: Int, m: Int, s: Int)? {
+        guard let range = notes.range(of: timeSpentTag) else { return nil }
+
+        let substring = notes[range.upperBound...]  // alles nach "time_spent:"
+
+        // Suche nach h/m/s separat
+        let hourMatch = substring.range(of: #"(\d+)\s*h"#, options: .regularExpression)
+        let minuteMatch = substring.range(of: #"(\d+)\s*m"#, options: .regularExpression)
+        let secondMatch = substring.range(of: #"(\d+)\s*s"#, options: .regularExpression)
+
+        func extractNumber(_ r: Range<String.Index>?) -> Int {
+            guard let r = r else { return 0 }
+            let match = substring[r]
+            let num = match.replacingOccurrences(of: #"[^0-9]"#, with: "", options: .regularExpression)
+            return Int(num) ?? 0
+        }
+
+        let h = extractNumber(hourMatch)
+        let m = extractNumber(minuteMatch)
+        let s = extractNumber(secondMatch)
+
+        if h == 0 && m == 0 && s == 0 {
+            // Format existiert, aber keine Zahlen → ungültig
+            return nil
+        }
+
+        return (h, m, s)
     }
     
     func addTimeToReminder(_ reminder: EKReminder, elapsed: TimeInterval) {
-        let newFormatted = formatElapsed(elapsed)
-
-        var existingHours = 0
-        var existingMinutes = 0
+        let addedSeconds = Int(elapsed.rounded())
         var existingSeconds = 0
 
-        if let notes = reminder.notes {
-            if let matchRange = notes.range(of: #"time_spent:\s*(\d+)h\s*(\d+)m\s*(\d+)s"#, options: .regularExpression) {
-                let match = String(notes[matchRange])
+        let existingNotes = reminder.notes ?? ""
 
-                let regex = try! NSRegularExpression(pattern: #"time_spent:\s*(\d+)h\s*(\d+)m\s*(\d+)s"#)
-                if let result = regex.firstMatch(in: match, range: NSRange(match.startIndex..., in: match)) {
-                    if let hRange = Range(result.range(at: 1), in: match),
-                       let mRange = Range(result.range(at: 2), in: match),
-                       let sRange = Range(result.range(at: 3), in: match) {
-
-                        existingHours = Int(match[hRange]) ?? 0
-                        existingMinutes = Int(match[mRange]) ?? 0
-                        existingSeconds = Int(match[sRange]) ?? 0
-                    }
-                }
-            }
+        if let parsed = parseExistingTimeSpent(in: existingNotes) {
+            existingSeconds = parsed.h * 3600 + parsed.m * 60 + parsed.s
         }
 
-        let newTotalSeconds = Int(elapsed.rounded())
-        let existingTotalSeconds = existingHours * 3600 + existingMinutes * 60 + existingSeconds
-        let combinedSeconds = existingTotalSeconds + newTotalSeconds
+        let combinedSeconds = existingSeconds + addedSeconds
+        let combinedString = formatElapsed(TimeInterval(combinedSeconds))
 
-        let combinedHours = combinedSeconds / 3600
-        let combinedMinutes = (combinedSeconds % 3600) / 60
-        let combinedSecs = combinedSeconds % 60
+        // neuen time_spent String bauen
+        let newTimeString = "\(timeSpentTag) \(combinedString)"
 
-        let combinedFormatted = "\(combinedHours)h \(combinedMinutes)m \(combinedSecs)s"
+        var updatedNotes = existingNotes
 
-        // Write back into notes
-        var newNotes = reminder.notes ?? ""
-        if newNotes.contains("time_spent:") {
-            // replace existing entry
-            newNotes = newNotes.replacingOccurrences(
-                of: #"time_spent:\s*\d+h\s*\d+m\s*\d+s"#,
-                with: "time_spent: \(combinedFormatted)",
+        if existingNotes.contains(timeSpentTag) {
+            // ersetzen mit Regex → robust
+            updatedNotes = existingNotes.replacingOccurrences(
+                of: timeSpentRegex,
+                with: newTimeString,
                 options: .regularExpression
             )
         } else {
-            // append new entry
-            if newNotes.isEmpty == false { newNotes += "\n" }
-            newNotes += "time_spent: \(combinedFormatted)"
+            // neu hinzufügen
+            if !updatedNotes.isEmpty { updatedNotes += "\n" }
+            updatedNotes += newTimeString
         }
 
-        reminder.notes = newNotes
+        reminder.notes = updatedNotes
 
         do {
             try eventStore.save(reminder, commit: true)
-            print("Gespeichert: \(newNotes)")
+            print("Gespeichert: \(updatedNotes)")
         } catch {
             print("Fehler beim Speichern: \(error)")
         }

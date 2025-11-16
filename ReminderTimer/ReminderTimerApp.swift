@@ -9,9 +9,12 @@ import SwiftUI
 
 @main
 struct ReminderTimerApp: App {
+    @StateObject var reminderManager = ReminderManager()
+
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .environmentObject(reminderManager)
         }
     }
 }

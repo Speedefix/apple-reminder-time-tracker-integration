@@ -23,6 +23,31 @@ struct ReminderDetailView: View {
                 Text("Fällig: \(due.formatted(date: .long, time: .shortened))")
                     .foregroundStyle(.secondary)
             }
+            
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Bisher aufgewendete Zeit")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                let pretty = reminderManager.prettyTimeSpent(for: reminder)
+
+                Text(pretty)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(
+                        pretty == "Untracked"
+                        ? Color.gray.opacity(0.1)
+                        : Color.blue.opacity(0.1)
+                    )
+                    .foregroundColor(
+                        pretty == "Untracked"
+                        ? .gray
+                        : .blue
+                    )
+                    .cornerRadius(8)
+                    .font(.headline)
+            }
+            .padding(.bottom, 8)
 
             Divider()
 
